@@ -51,12 +51,27 @@ class Groups:
 
     def _save(self):
         try:
+            self._trim()
             DB.write_text(
                 json.dumps(self._data, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
         except Exception as e:
             log.warning(f"Save failed: {e}")
+
+    def _trim(self):
+        """شيل الـ groups الـ inactive من الـ RAM لو عدى عليها أكتر من 30 يوم."""
+        MAX_INACTIVE_DAYS = 30
+        cutoff = time.time() - MAX_INACTIVE_DAYS * 86400
+        to_remove = [
+            gid for gid, info in self._data.items()
+            if not info.get("active")
+            and info.get("joined_at", 0) < cutoff
+        ]
+        for gid in to_remove:
+            del self._data[gid]
+        if to_remove:
+            log.info(f"Trimmed {len(to_remove)} old inactive groups from RAM")
 
     def reload(self):
         self._data = self._load()
