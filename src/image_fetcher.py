@@ -4,6 +4,7 @@ Uses AI-generated keywords from lesson content.
 """
 
 import os
+import random
 import requests
 from pathlib import Path
 from typing import Optional
