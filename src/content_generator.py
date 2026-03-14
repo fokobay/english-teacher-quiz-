@@ -455,4 +455,51 @@ class ContentGenerator:
 
         data = json.loads(raw)
         logger.info(f"Content ready: [{data['post_type']}] {data.get('subject', '')}")
+
+        # توليد keywords ذكية بناءً على المحتوى الفعلي
+        try:
+            data["image_keywords"] = self._smart_keywords(
+                data["post_type"],
+                data.get("subject", ""),
+                data.get("content", ""),
+            )
+            logger.info(f"Smart keywords: {data['image_keywords']}")
+        except Exception as e:
+            logger.warning(f"Smart keywords failed, keeping original: {e}")
+
         return data
+
+    def _smart_keywords(self, post_type: str, subject: str, content: str) -> list:
+        """يبعت المحتوى لـ Groq ويرجع 3 keywords محددة للصورة."""
+        prompt = (
+            f"You are a visual search expert. Based on this English lesson, suggest EXACTLY 3 "
+            f"short image search keywords (2-4 words each) that would find a HIGHLY RELEVANT, "
+            f"visually interesting photo for this specific lesson.\n\n"
+            f"Lesson type: {post_type}\n"
+            f"Subject: {subject}\n"
+            f"Content snippet: {content[:300]}\n\n"
+            f"Rules:\n"
+            f"- Keywords must reflect the SPECIFIC topic, not just 'English lesson'\n"
+            f"- Think visually: what scene, object, or emotion fits this content?\n"
+            f"- Use real-world photography keywords (no cartoon, no illustration)\n"
+            f"- Return ONLY a JSON array of 3 strings, nothing else\n\n"
+            f'Example: ["frustrated student exam", "grammar chalkboard close", "pencil paper mistake"]'
+        )
+        res = self.client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "Return ONLY a valid JSON array of 3 strings. No explanation."},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature=0.6,
+            max_tokens=80,
+        )
+        raw = res.choices[0].message.content.strip()
+        raw = re.sub(r"```(?:json)?\s*", "", raw)
+        raw = re.sub(r"```", "", raw)
+        m   = re.search(r"\[.*?\]", raw, re.DOTALL)
+        if m:
+            keywords = json.loads(m.group(0))
+            if isinstance(keywords, list) and len(keywords) >= 2:
+                return [str(k) for k in keywords[:3]]
+        raise ValueError(f"Invalid keywords response: {raw}")
