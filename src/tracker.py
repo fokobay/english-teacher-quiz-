@@ -14,6 +14,11 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 DB_PATH  = DATA_DIR / "history.json"
 MAX_KEEP = 120
 
+# BUG FIX: POST_TYPES was imported inside least_used_types() on every call.
+# Moved to module level. The import is safe here — content_generator does not
+# import tracker, so there is no circular dependency.
+from src.content_generator import POST_TYPES
+
 
 class Tracker:
     def __init__(self):
@@ -40,7 +45,6 @@ class Tracker:
         posts = self._data.get("posts", [])
         if len(posts) > MAX_KEEP:
             self._data["posts"] = posts[-MAX_KEEP:]
-            # أعد حساب type_counts من الـ posts الموجودة بس
             counts = {}
             for p in self._data["posts"]:
                 t = p.get("post_type", "")
@@ -68,7 +72,6 @@ class Tracker:
         logger.info(f"Recorded [{post_type}] {subject}")
 
     def least_used_types(self, n: int = 3) -> list:
-        from src.content_generator import POST_TYPES
         counts = self._data.get("type_counts", {})
         return sorted(POST_TYPES, key=lambda t: counts.get(t, 0))[:n]
 
