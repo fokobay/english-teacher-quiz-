@@ -80,7 +80,13 @@ class Poller:
 
         if status in ("member", "administrator"):
             log.info(f"Joined: {title} ({cid})")
-            self._handle_join(cid, title)
+            # شغّل في thread منفصل عشان ما يبلوكش الـ polling
+            threading.Thread(
+                target=self._handle_join,
+                args=(cid, title),
+                daemon=True,
+                name=f"join-{cid}",
+            ).start()
         elif status in ("left", "kicked", "banned", "restricted"):
             log.info(f"Removed from: {title} ({cid})")
             self.groups.remove(cid)
@@ -148,6 +154,8 @@ class Poller:
     # ── Admin text commands ───────────────────────────────────────────
 
     def _on_admin_cmd(self, text: str):
+        if not ADMIN_ID:
+            return
         parts = text.split()
         cmd   = parts[0].lower() if parts else ""
 
