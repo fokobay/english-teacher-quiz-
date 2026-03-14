@@ -36,7 +36,8 @@ class Tracker:
 
     def was_posted(self, subject: str) -> bool:
         s = subject.lower().strip()
-        return s in [p["subject"].lower() for p in self._data["posts"][-40:]]
+        recent = {p["subject"].lower() for p in self._data["posts"][-40:]}
+        return s in recent
 
     def record(self, post_type: str, subject: str, snippet: str):
         self._data["posts"].append({
