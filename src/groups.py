@@ -7,7 +7,7 @@ Cycle per group (every 6h):
   next_step=0 → lesson
   next_step=1 → quiz
 """
-import json, os, time, requests
+import json, os, re, time, requests
 from pathlib import Path
 from src.logger import setup_logger
 
@@ -78,16 +78,28 @@ class Groups:
 
     # ── Telegram helpers ──────────────────────────────────────────────
 
-    def get_member_count(self, chat_id: str) -> int:
+    def get_member_count(self, chat_id: str):
+        """
+        Returns member count (int), or None if the API call failed.
+
+        BUG FIX: previously returned 0 on any failure, which caused the bot
+        to treat unreachable-but-valid groups as 'too small' and leave them.
+        Now returns None on failure so handle_join can skip rather than reject.
+        """
         try:
             r = requests.get(
                 f"{BASE}/getChatMemberCount",
                 params={"chat_id": chat_id},
                 timeout=10,
             )
-            return r.json().get("result", 0)
-        except Exception:
-            return 0
+            result = r.json()
+            if result.get("ok"):
+                return result.get("result", 0)
+            log.warning(f"getChatMemberCount error for {chat_id}: {result.get('description')}")
+            return None
+        except Exception as e:
+            log.warning(f"getChatMemberCount failed for {chat_id}: {e}")
+            return None
 
     def get_chat_username(self, chat_id: str) -> str:
         """Return username (without @) or '' if the group has none."""
@@ -114,30 +126,35 @@ class Groups:
         if username:
             return f'<a href="https://t.me/{username}">{safe}</a>'
         # Deep-link fallback for private/no-username supergroups.
-        # Supergroup IDs look like -100XXXXXXXXXX; we need just the digits.
-        # Use removeprefix (Python 3.9+) to avoid lstrip character-set bug.
-        numeric = chat_id.removeprefix("-100").removeprefix("-")
+        # Supergroup IDs look like -100XXXXXXXXXX; strip prefix to get plain digits.
+        # BUG FIX: replaced .removeprefix() (Python 3.9+ only) with re.sub
+        # so the bot runs correctly on Python 3.8 environments too.
+        numeric = re.sub(r"^-100", "", chat_id).lstrip("-")
         return f'<a href="tg://openmessage?chat_id={numeric}">{safe}</a>'
 
     # ── Join / Leave ──────────────────────────────────────────────────
 
     def handle_join(self, chat_id: str, title: str) -> str:
-        """Returns: 'approved' | 'too_small' | 'existing'"""
+        """Returns: 'approved' | 'too_small' | 'existing' | 'unknown'"""
         gid      = str(chat_id)
         count    = self.get_member_count(gid)
         username = self.get_chat_username(gid)
+
+        # BUG FIX: count=None means the API failed — don't reject the group.
+        # Return 'unknown' so poller skips silently instead of leaving.
+        if count is None:
+            log.warning(f"Could not verify member count for {title} ({gid}) — skipping join")
+            return "unknown"
 
         if count < MIN_MEMBERS:
             log.info(f"Too small: {title} ({gid}) — {count} members < {MIN_MEMBERS:,}")
             return "too_small"
 
         if gid in self._data:
-            # بنحافظ على الـ progress (quiz_count, next_step) ومش بنريسته
             self._data[gid]["active"]   = True
             self._data[gid]["title"]    = title
             self._data[gid]["username"] = username
             self._data[gid]["members"]  = count
-            # بس لو last_post قديم جداً (أكتر من 24 ساعة) نخليه يبدأ فوراً
             if time.time() - self._data[gid].get("last_post", 0) > 86400:
                 self._data[gid]["last_post"] = 0
             self._save()
