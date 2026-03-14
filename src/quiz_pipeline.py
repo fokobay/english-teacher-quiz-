@@ -59,8 +59,9 @@ def run_quiz(chat_id: str, quiz_num: int) -> bool:
 
     # Announce
     msg = api.send(chat_id, api.txt_announce(quiz_num, len(questions)))
-    if msg:
-        api.pin(chat_id, msg["message_id"])
+    announce_msg_id = msg["message_id"] if msg else None
+    if announce_msg_id:
+        api.pin(chat_id, announce_msg_id)
     time.sleep(10)
 
     # Questions
@@ -76,9 +77,19 @@ def run_quiz(chat_id: str, quiz_num: int) -> bool:
     total = scores.count(chat_id)
     scores.commit(chat_id, quiz_num)
 
+    # إلغاء تثبيت رسالة الإعلان بعد ما الاختبار خلص
+    if announce_msg_id:
+        api.unpin(chat_id, announce_msg_id)
+
     msg = api.send(chat_id, api.txt_final(board, quiz_num, total, len(questions)))
     if msg:
-        api.pin(chat_id, msg["message_id"])
+        final_msg_id = msg["message_id"]
+        api.pin(chat_id, final_msg_id)
+        # إلغاء تثبيت رسالة نتايج الاختبار بعد 3 ساعات تلقائياً
+        threading.Timer(
+            3 * 3600,
+            lambda: api.unpin(chat_id, final_msg_id)
+        ).start()
 
     # All-time leaderboard every 5 quizzes
     if quiz_num % 5 == 0:
