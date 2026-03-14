@@ -17,7 +17,11 @@ class Poller:
         self.groups               = groups
         self._offset              = 0
         self._bot_id: str         = ""
-        self._joined_recently: set = set()
+        # BUG FIX: _joined_recently was accessed from multiple threads without a lock.
+        # Added _joined_lock to prevent race conditions when many groups add the bot
+        # simultaneously (e.g. after a bot restart or viral share).
+        self._joined_recently: set  = set()
+        self._joined_lock           = threading.Lock()
         api.delete_webhook()
 
     def tick(self):
@@ -80,7 +84,6 @@ class Poller:
 
         if status in ("member", "administrator"):
             log.info(f"Joined: {title} ({cid})")
-            # شغّل في thread منفصل عشان ما يبلوكش الـ polling
             threading.Thread(
                 target=self._handle_join,
                 args=(cid, title),
@@ -92,12 +95,15 @@ class Poller:
             self.groups.remove(cid)
 
     def _handle_join(self, cid: str, title: str):
-        # De-duplicate rapid join events (some groups fire it twice)
-        if cid in self._joined_recently:
-            log.info(f"Duplicate join ignored: {title} ({cid})")
-            return
-        self._joined_recently.add(cid)
-        threading.Timer(10, lambda: self._joined_recently.discard(cid)).start()
+        # BUG FIX: protect _joined_recently with a lock — this method runs in
+        # its own daemon thread and multiple groups can join simultaneously.
+        with self._joined_lock:
+            if cid in self._joined_recently:
+                log.info(f"Duplicate join ignored: {title} ({cid})")
+                return
+            self._joined_recently.add(cid)
+
+        threading.Timer(10, self._discard_joined, args=(cid,)).start()
 
         status  = self.groups.handle_join(cid, title)
         members = self.groups._data.get(cid, {}).get("members", 0)
@@ -116,6 +122,16 @@ class Poller:
 
         elif status == "existing":
             self.groups.welcome(cid)
+
+        elif status == "unknown":
+            # API failed — don't leave; log and do nothing so the scheduler
+            # can still serve the group if it was already registered.
+            log.warning(f"Join for {title} ({cid}) skipped — member count unknown")
+
+    def _discard_joined(self, cid: str):
+        """Remove cid from _joined_recently after the dedup window expires."""
+        with self._joined_lock:
+            self._joined_recently.discard(cid)
 
     # ── Admin inline callbacks ────────────────────────────────────────
 
