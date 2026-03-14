@@ -59,9 +59,8 @@ def run_quiz(chat_id: str, quiz_num: int) -> bool:
 
     # Announce
     msg = api.send(chat_id, api.txt_announce(quiz_num, len(questions)))
-    announce_msg_id = msg["message_id"] if msg else None
-    if announce_msg_id:
-        api.pin(chat_id, announce_msg_id)
+    if msg:
+        api.pin(chat_id, msg["message_id"])
     time.sleep(10)
 
     # Questions
@@ -77,19 +76,9 @@ def run_quiz(chat_id: str, quiz_num: int) -> bool:
     total = scores.count(chat_id)
     scores.commit(chat_id, quiz_num)
 
-    # إلغاء تثبيت رسالة الإعلان بعد ما الاختبار خلص
-    if announce_msg_id:
-        api.unpin(chat_id, announce_msg_id)
-
     msg = api.send(chat_id, api.txt_final(board, quiz_num, total, len(questions)))
     if msg:
-        final_msg_id = msg["message_id"]
-        api.pin(chat_id, final_msg_id)
-        # إلغاء تثبيت رسالة نتايج الاختبار بعد 3 ساعات تلقائياً
-        threading.Timer(
-            3 * 3600,
-            lambda: api.unpin(chat_id, final_msg_id)
-        ).start()
+        api.pin(chat_id, msg["message_id"])
 
     # All-time leaderboard every 5 quizzes
     if quiz_num % 5 == 0:
@@ -130,7 +119,6 @@ def _run_one(chat_id: str, number: int, q: dict, total_q: int, scores: Scores):
     msg_id  = None
 
     if result:
-        # result is the Message object: {"message_id": X, "poll": {"id": "...", ...}, ...}
         msg_id  = result.get("message_id")
         poll    = result.get("poll", {})
         poll_id = poll.get("id")
@@ -145,16 +133,19 @@ def _run_one(chat_id: str, number: int, q: dict, total_q: int, scores: Scores):
                     "answered":    set(),
                 }
 
+    # لو الـ poll ما اتبعتش، متستناش 3 دقايق عبثاً
+    if not poll_id:
+        log.warning(f"[{chat_id}] Q{number} poll failed — skipping wait")
+        return
+
     # Wait for the poll to expire
     time.sleep(POLL_SECONDS)
 
-    # Close the poll on Telegram and clean up state
-    if poll_id:
-        stored_msg_id = poll_answers.get(poll_id, {}).get("msg_id")
-        if stored_msg_id:
-            api.stop_poll(chat_id, stored_msg_id)
-        with _poll_lock:
-            poll_answers.pop(poll_id, None)
+    # Close the poll on Telegram and clean up state كاملاً من الـ memory
+    with _poll_lock:
+        state = poll_answers.pop(poll_id, None)
+    if state and state.get("msg_id"):
+        api.stop_poll(chat_id, state["msg_id"])
 
 
 # ── Poll answer callback (called from Poller thread) ──────────────────
