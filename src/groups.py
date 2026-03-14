@@ -117,15 +117,16 @@ class Groups:
             return "too_small"
 
         if gid in self._data:
-            self._data[gid].update({
-                "active":    True,
-                "title":     title,
-                "username":  username,
-                "last_post": 0,
-                "next_step": 0,
-            })
+            # بنحافظ على الـ progress (quiz_count, next_step) ومش بنريسته
+            self._data[gid]["active"]   = True
+            self._data[gid]["title"]    = title
+            self._data[gid]["username"] = username
+            self._data[gid]["members"]  = count
+            # بس لو last_post قديم جداً (أكتر من 24 ساعة) نخليه يبدأ فوراً
+            if time.time() - self._data[gid].get("last_post", 0) > 86400:
+                self._data[gid]["last_post"] = 0
             self._save()
-            log.info(f"Reactivated: {title} ({gid}) — {count} members")
+            log.info(f"Reactivated: {title} ({gid}) — {count} members, quiz_count={self._data[gid].get('quiz_count',0)}")
             return "existing"
 
         self._data[gid] = {
@@ -196,7 +197,6 @@ class Groups:
         """Return [(chat_id, step), ...] for groups whose next step is due."""
         now     = time.time()
         result  = []
-        waiting = []
         running = running or set()
         for gid, info in self._data.items():
             if not info.get("active"):
@@ -210,10 +210,7 @@ class Groups:
             else:
                 rem  = INTERVAL_HOURS - elapsed
                 name = "lesson" if info.get("next_step", 0) == 0 else "quiz"
-                waiting.append(f"{info['title']} ({rem:.1f}h→{name})")
-
-        if waiting:
-            log.info(f"⏳ Waiting: {', '.join(waiting)}")
+                log.info(f"⏳ {info['title']} — {rem:.1f}h until {name}")
         return result
 
     def active_count(self) -> int:
