@@ -4,7 +4,6 @@ Uses MoviePy + gTTS + Pillow.
 """
 
 import re
-import textwrap
 import numpy as np
 from pathlib import Path
 from typing import Optional
@@ -102,11 +101,20 @@ class VideoBuilder:
                       + f". Memory tip: {trick}")
         audio_path = out.parent / "tts.mp3"
         gTTS(text=script, lang="en", slow=False).save(str(audio_path))
-        audio      = AudioFileClip(str(audio_path))
-        total      = audio.duration
+        audio = AudioFileClip(str(audio_path))
+        total = audio.duration
 
-        seg_durs = [3, 4, 4, max(total - 14, 4), 3]
-        frames   = [
+        # توزيع مضمون: 3 slides ثابتة (3+4+4=11ث) + slide رابع + slide خامس 3ث
+        # الـ slide الرابع يأخذ ما تبقى، بحد أدنى 4 ثوانٍ
+        fixed_durs  = [3, 4, 4, 3]          # slide 1,2,3,5
+        slide4_dur  = max(total - sum(fixed_durs), 4)
+        seg_durs    = [3, 4, 4, slide4_dur, 3]
+        # لو المجموع أكبر من الـ audio، نضغط slide4 تلقائياً
+        if sum(seg_durs) > total:
+            slide4_dur = max(total - 14, 2)
+            seg_durs   = [3, 4, 4, slide4_dur, 3]
+
+        frames = [
             self._slide_word(bg, word, phonetic),
             self._slide_listen(bg, word),
             self._slide_compare(bg, wrong, correct),
@@ -114,14 +122,17 @@ class VideoBuilder:
             self._slide_tip(bg, trick),
         ]
 
-        clips = [ImageClip(f, duration=d) for f, d in zip(frames, seg_durs)]
-        video = concatenate_videoclips(clips, method="compose").set_audio(audio).set_duration(total)
-        video.write_videofile(str(out), fps=FPS, codec="libx264",
-                              audio_codec="aac", preset="ultrafast",
-                              threads=1, logger=None)
-        audio.close()
-        video.close()
-        audio_path.unlink(missing_ok=True)
+        try:
+            clips = [ImageClip(f, duration=d) for f, d in zip(frames, seg_durs)]
+            video = concatenate_videoclips(clips, method="compose").set_audio(audio).set_duration(total)
+            video.write_videofile(str(out), fps=FPS, codec="libx264",
+                                  audio_codec="aac", preset="ultrafast",
+                                  threads=1, logger=None)
+            video.close()
+        finally:
+            audio.close()
+            audio_path.unlink(missing_ok=True)
+
         logger.info("Pronunciation video ready ✓")
         return out
 
@@ -170,15 +181,16 @@ class VideoBuilder:
         img  = Image.fromarray(bg.copy())
         draw = ImageDraw.Draw(img)
         _header(draw, "📝  EXAMPLE SENTENCES")
-        y = 150
+        y = 160
         for i, ex in enumerate(examples[:3], 1):
-            if y > 860:
+            if y > 840:
                 break
-            _center_text(draw, f"{i}.", _font(52), y, ACCENT)
-            y += 60
+            # رقم الجملة على سطر منفصل فوق الجملة
+            _center_text(draw, f"— {i} —", _font(46), y, ACCENT)
+            y += 58
             y = _wrap_centered(draw, ex, _font(44, False), y, (220, 220, 220),
                                max_width=960, line_gap=12)
-            y += 28
+            y += 32
         _footer(draw, "Use it in a sentence today!  ✍️")
         return np.array(img)
 
@@ -211,29 +223,69 @@ class VideoBuilder:
             for y in range(H):
                 arr[y] = (dark * (1 - y / H * 0.3)).astype(np.uint8)
             img = Image.fromarray(arr)
-        return (np.array(img).astype(np.float32) * 0.35).astype(np.uint8)
+        return (np.array(img).astype(np.float32) * 0.55).astype(np.uint8)
 
     def _parse(self, text: str) -> dict:
         result   = {}
         examples = []
-        for line in text.replace("\\n", "\n").split("\n"):
+        lines    = text.replace("\\n", "\n").split("\n")
+
+        for line in lines:
             c  = re.sub(r"\*+", "", line).strip()
             c  = re.sub(r"_(.+?)_", r"\1", c).strip()
             ll = c.lower()
-            if "word" in ll and "/" in c:
-                parts = re.findall(r"([A-Za-z]+)\s*/([^/]+)/", c)
-                if parts:
-                    result["word"]     = parts[0][0]
-                    result["phonetic"] = "/" + parts[0][1] + "/"
-            elif ("wrong" in ll or "❌" in line) and ":" in c:
-                result["wrong"] = c.split(":", 1)[-1].strip()
-            elif "correct" in ll and ":" in c and "wrong" not in ll:
-                result["correct"] = c.split(":", 1)[-1].strip()
-            elif c.startswith(("•", "→")) and len(c) > 5:
-                examples.append(c.lstrip("•→ ").strip())
-            elif ("trick" in ll or "tip" in ll) and ":" in c:
+
+            # ── الكلمة والـ phonetic ──────────────────────────────────
+            # صيغة: "Word: COLONEL /KER-nel/" أو "🔤 Word: COLONEL /KER-nel/"
+            if not result.get("word"):
+                # محاولة 1: كلمة + phonetic في نفس السطر
+                m = re.search(r"([A-Za-z]{2,})\s+(/[^/]+/)", c)
+                if m:
+                    result["word"]     = m.group(1).capitalize()
+                    result["phonetic"] = m.group(2)
+                else:
+                    # محاولة 2: سطر "Word: COLONEL" من غير phonetic
+                    m2 = re.match(r"(?:word|🔤)[:\s]+([A-Za-z\-']{2,})", c, re.IGNORECASE)
+                    if m2:
+                        result["word"] = m2.group(1).strip().capitalize()
+
+            # ── phonetic منفصل ────────────────────────────────────────
+            if not result.get("phonetic"):
+                m = re.search(r"/([^/]{1,30})/", c)
+                if m and len(m.group(1)) > 1:
+                    result["phonetic"] = "/" + m.group(1) + "/"
+
+            # ── الغلط والصح ───────────────────────────────────────────
+            if ("wrong" in ll or "❌" in line or "people say" in ll) and ":" in c:
+                val = c.split(":", 1)[-1].strip().strip('"').strip("'")
+                if val and not result.get("wrong"):
+                    result["wrong"] = val
+
+            elif ("correct" in ll or "✅" in line) and ":" in c and "wrong" not in ll and "mistake" not in ll:
+                val = c.split(":", 1)[-1].strip().strip('"').strip("'")
+                if val and len(val) > 3 and not result.get("correct"):
+                    result["correct"] = val
+
+            # ── أمثلة ─────────────────────────────────────────────────
+            elif c.startswith(("•", "→", "-")) and len(c) > 5:
+                examples.append(c.lstrip("•→- ").strip())
+
+            # ── memory trick ──────────────────────────────────────────
+            elif ("trick" in ll or "tip" in ll or "memory" in ll) and ":" in c:
                 val = c.split(":", 1)[-1].strip()
-                if len(val) > 10:
+                if len(val) > 10 and not result.get("trick"):
                     result["trick"] = val
+
         result["examples"] = examples[:3]
+
+        # قيم افتراضية لو الـ parse فشل
+        if not result.get("word"):
+            result["word"] = "English"
+        if not result.get("wrong"):
+            result["wrong"] = "Incorrect pronunciation"
+        if not result.get("correct"):
+            result["correct"] = "Correct pronunciation"
+        if not result.get("trick"):
+            result["trick"] = "Practice makes perfect — say it 3 times aloud!"
+
         return result
