@@ -129,7 +129,15 @@ class Generator:
         for qtype, count in DISTRIBUTION:
             batch = self._batch(qtype, count)
             all_questions.extend(batch)
-            log.info(f"  {qtype}: {len(batch)}/{count} ✓")
+            if len(batch) == 0:
+                log.warning(f"  {qtype}: 0/{count} — skipped entirely")
+            else:
+                log.info(f"  {qtype}: {len(batch)}/{count} ✓")
+
+        if len(all_questions) < 10:
+            raise RuntimeError(
+                f"Too few questions generated: {len(all_questions)}/20 — aborting quiz"
+            )
 
         random.shuffle(all_questions)
         log.info(f"Total ready: {len(all_questions)} questions")
