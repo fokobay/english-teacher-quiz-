@@ -196,6 +196,7 @@ class Groups:
         """Return [(chat_id, step), ...] for groups whose next step is due."""
         now     = time.time()
         result  = []
+        waiting = []
         running = running or set()
         for gid, info in self._data.items():
             if not info.get("active"):
@@ -209,7 +210,10 @@ class Groups:
             else:
                 rem  = INTERVAL_HOURS - elapsed
                 name = "lesson" if info.get("next_step", 0) == 0 else "quiz"
-                log.info(f"⏳ {info['title']} — {rem:.1f}h until {name}")
+                waiting.append(f"{info['title']} ({rem:.1f}h→{name})")
+
+        if waiting:
+            log.info(f"⏳ Waiting: {', '.join(waiting)}")
         return result
 
     def active_count(self) -> int:
