@@ -24,24 +24,26 @@ WORK_DIR.mkdir(exist_ok=True)
 
 # Lazy singletons — created on first use so import never fails
 # even if env-vars (GROQ_API_KEY, etc.) are not set at import time.
-_tracker: Optional[Tracker]          = None
-_gen:     Optional[ContentGenerator] = None
-_poster:  Optional[TelegramPoster]   = None
-_fetcher: Optional[ImageFetcher]     = None
+_tracker:  Optional[Tracker]          = None
+_gen:      Optional[ContentGenerator] = None
+_poster:   Optional[TelegramPoster]   = None
+_fetcher:  Optional[ImageFetcher]     = None
+_quiz_gen: Optional[QuizGenerator]    = None
 
 
 def _get_singletons():
-    global _tracker, _gen, _poster, _fetcher
+    global _tracker, _gen, _poster, _fetcher, _quiz_gen
     if _tracker is None:
-        _tracker = Tracker()
-        _gen     = ContentGenerator()
-        _poster  = TelegramPoster()
-        _fetcher = ImageFetcher()
-    return _tracker, _gen, _poster, _fetcher
+        _tracker  = Tracker()
+        _gen      = ContentGenerator()
+        _poster   = TelegramPoster()
+        _fetcher  = ImageFetcher()
+        _quiz_gen = QuizGenerator()
+    return _tracker, _gen, _poster, _fetcher, _quiz_gen
 
 
 def run_lesson(chat_id: str) -> bool:
-    tracker, gen, poster, fetcher = _get_singletons()
+    tracker, gen, poster, fetcher, quiz_gen = _get_singletons()
 
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     work = WORK_DIR / f"lesson_{ts}_{str(chat_id)[-6:]}"
@@ -84,7 +86,7 @@ def run_lesson(chat_id: str) -> bool:
         # Small quiz poll right after the lesson
         time.sleep(2)
         try:
-            quiz = QuizGenerator().generate(post_type, text)
+            quiz = quiz_gen.generate(post_type, text)
             if quiz:
                 poster.post_poll(quiz, chat_id=chat_id)
         except Exception as e:
