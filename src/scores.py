@@ -1,7 +1,7 @@
 """
 Tracks scores per session + all-time leaderboard.
 Stores user_id for Telegram mention links.
-Persists to DATA_DIR/scores.json
+Persists to DATA_DIR/scores.json + DATA_DIR/sessions.json
 """
 import json, os
 from pathlib import Path
@@ -10,12 +10,13 @@ from src.logger import setup_logger
 log      = setup_logger("scores")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 DB       = DATA_DIR / "scores.json"
+SESS_DB  = DATA_DIR / "sessions.json"
 
 
 class Scores:
     def __init__(self):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        self._sessions: dict = {}   # {chat_id: {user_id: {name,user_id,correct,answered}}}
+        self._sessions: dict = self._load_sessions()
         self._alltime        = self._load()
 
     def _load(self) -> dict:
@@ -26,16 +27,31 @@ class Scores:
             pass
         return {}
 
+    def _load_sessions(self) -> dict:
+        try:
+            if SESS_DB.exists():
+                return json.loads(SESS_DB.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
     def _save(self):
         try:
             DB.write_text(json.dumps(self._alltime, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
             log.warning(f"Save failed: {e}")
 
+    def _save_sessions(self):
+        try:
+            SESS_DB.write_text(json.dumps(self._sessions, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            log.warning(f"Session save failed: {e}")
+
     # ── Session ──────────────────────────────────────────────────────
 
     def start(self, chat_id: str):
         self._sessions[str(chat_id)] = {}
+        self._save_sessions()
 
     def record(self, chat_id: str, user_id: int, name: str, correct: bool):
         cid, uid = str(chat_id), str(user_id)
@@ -47,6 +63,7 @@ class Scores:
         sess[uid]["answered"] += 1
         if correct:
             sess[uid]["correct"] += 1
+        self._save_sessions()
 
     def session_board(self, chat_id: str) -> list:
         """Sorted [(name, user_id, correct, answered), ...]"""
@@ -89,6 +106,9 @@ class Scores:
             rec["last_quiz"] = quiz_num
 
         self._save()
+        # امسح الـ session من الـ disk بعد ما اتحفظت في alltime
+        self._sessions.pop(cid, None)
+        self._save_sessions()
         log.info(f"Committed quiz #{quiz_num} for {cid} — {len(sess)} players")
 
     def alltime_board(self, chat_id: str) -> list:
