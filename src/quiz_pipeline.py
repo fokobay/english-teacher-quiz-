@@ -66,9 +66,15 @@ def run_quiz(chat_id: str, quiz_num: int) -> bool:
     # Questions
     for i, q in enumerate(questions, 1):
         _run_one(chat_id, i, q, len(questions), scores)
+
         if i == 10:
+            # BUG FIX: added `continue` to skip the trailing sleep(3) after the
+            # halfway message — there's no need to pause again right after sending
+            # the leaderboard recap; Q11 should start promptly.
             time.sleep(1)
             api.send(chat_id, api.txt_halfway(scores.session_board(chat_id)))
+            continue
+
         time.sleep(3)
 
     # Final results
@@ -105,8 +111,6 @@ def _run_one(chat_id: str, number: int, q: dict, total_q: int, scores: Scores):
         options_list  = [opts["A"], opts["B"], opts["C"], opts["D"]]
         correct_index = MCQ_LETTERS.index(q["correct"])
 
-    # api.send_poll returns the full Message object (dict) from Telegram,
-    # which has "message_id" at the top level and "poll" nested inside.
     result = api.send_poll(
         chat_id       = chat_id,
         question      = q_text,
@@ -133,15 +137,12 @@ def _run_one(chat_id: str, number: int, q: dict, total_q: int, scores: Scores):
                     "answered":    set(),
                 }
 
-    # لو الـ poll ما اتبعتش، متستناش 3 دقايق عبثاً
     if not poll_id:
         log.warning(f"[{chat_id}] Q{number} poll failed — skipping wait")
         return
 
-    # Wait for the poll to expire
     time.sleep(POLL_SECONDS)
 
-    # Close the poll on Telegram and clean up state كاملاً من الـ memory
     with _poll_lock:
         state = poll_answers.pop(poll_id, None)
     if state and state.get("msg_id"):
