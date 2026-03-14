@@ -37,9 +37,21 @@ class Scores:
 
     def _save(self):
         try:
+            self._trim_alltime()
             DB.write_text(json.dumps(self._alltime, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
             log.warning(f"Save failed: {e}")
+
+    def _trim_alltime(self):
+        """احتفظ بأحسن 200 يوزر لكل group — شيل الباقي من الـ RAM."""
+        MAX_USERS = 200
+        for cid in list(self._alltime.keys()):
+            users = self._alltime[cid]
+            if len(users) > MAX_USERS:
+                # رتّب حسب total descending واحتفظ بالأحسن بس
+                top = sorted(users.items(), key=lambda x: -x[1].get("total", 0))
+                self._alltime[cid] = dict(top[:MAX_USERS])
+                log.info(f"Trimmed alltime [{cid}]: {len(users)} → {MAX_USERS} users")
 
     def _save_sessions(self):
         try:
