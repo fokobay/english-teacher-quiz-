@@ -37,7 +37,6 @@ def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont:
 def _center_text(draw, text, font, y, color, shadow=True):
     bb = draw.textbbox((0, 0), text, font=font)
     x  = (W - (bb[2] - bb[0])) // 2
-    # Thick black outline for readability on any background
     for dx in (-3, -2, -1, 0, 1, 2, 3):
         for dy in (-3, -2, -1, 0, 1, 2, 3):
             if dx != 0 or dy != 0:
@@ -104,12 +103,9 @@ class VideoBuilder:
         audio = AudioFileClip(str(audio_path))
         total = audio.duration
 
-        # توزيع مضمون: 3 slides ثابتة (3+4+4=11ث) + slide رابع + slide خامس 3ث
-        # الـ slide الرابع يأخذ ما تبقى، بحد أدنى 4 ثوانٍ
-        fixed_durs  = [3, 4, 4, 3]          # slide 1,2,3,5
+        fixed_durs  = [3, 4, 4, 3]
         slide4_dur  = max(total - sum(fixed_durs), 4)
         seg_durs    = [3, 4, 4, slide4_dur, 3]
-        # لو المجموع أكبر من الـ audio، نضغط slide4 تلقائياً
         if sum(seg_durs) > total:
             slide4_dur = max(total - 14, 2)
             seg_durs   = [3, 4, 4, slide4_dur, 3]
@@ -122,14 +118,19 @@ class VideoBuilder:
             self._slide_tip(bg, trick),
         ]
 
+        # BUG FIX: video was only closed inside the try block, so if
+        # write_videofile() raised an exception the VideoFileClip object leaked.
+        # Now video is tracked outside the try so finally can always close it.
+        video = None
         try:
             clips = [ImageClip(f, duration=d) for f, d in zip(frames, seg_durs)]
             video = concatenate_videoclips(clips, method="compose").set_audio(audio).set_duration(total)
             video.write_videofile(str(out), fps=FPS, codec="libx264",
                                   audio_codec="aac", preset="ultrafast",
                                   threads=1, logger=None)
-            video.close()
         finally:
+            if video is not None:
+                video.close()
             audio.close()
             audio_path.unlink(missing_ok=True)
 
@@ -162,13 +163,11 @@ class VideoBuilder:
         draw = ImageDraw.Draw(img)
         _header(draw, "❌  WRONG   vs   ✅  CORRECT")
 
-        # WRONG box — bigger and clearer
         draw.rectangle([40, 150, W - 40, 490], fill=(70, 10, 10))
         draw.rectangle([40, 150, W - 40, 156], fill=(255, 80, 80))
         _center_text(draw, "❌  WRONG", _font(58), 170, (255, 80,  80))
         _wrap_centered(draw, wrong,     _font(52, False), 255, (255, 180, 180), max_width=940)
 
-        # CORRECT box — bigger and clearer
         draw.rectangle([40, 530, W - 40, 870], fill=(10, 60, 20))
         draw.rectangle([40, 530, W - 40, 536], fill=(80, 255, 120))
         _center_text(draw, "✅  CORRECT", _font(58), 550, (80, 255, 120))
@@ -185,7 +184,6 @@ class VideoBuilder:
         for i, ex in enumerate(examples[:3], 1):
             if y > 840:
                 break
-            # رقم الجملة على سطر منفصل فوق الجملة
             _center_text(draw, f"— {i} —", _font(46), y, ACCENT)
             y += 58
             y = _wrap_centered(draw, ex, _font(44, False), y, (220, 220, 220),
@@ -235,27 +233,21 @@ class VideoBuilder:
             c  = re.sub(r"_(.+?)_", r"\1", c).strip()
             ll = c.lower()
 
-            # ── الكلمة والـ phonetic ──────────────────────────────────
-            # صيغة: "Word: COLONEL /KER-nel/" أو "🔤 Word: COLONEL /KER-nel/"
             if not result.get("word"):
-                # محاولة 1: كلمة + phonetic في نفس السطر
                 m = re.search(r"([A-Za-z]{2,})\s+(/[^/]+/)", c)
                 if m:
                     result["word"]     = m.group(1).capitalize()
                     result["phonetic"] = m.group(2)
                 else:
-                    # محاولة 2: سطر "Word: COLONEL" من غير phonetic
                     m2 = re.match(r"(?:word|🔤)[:\s]+([A-Za-z\-']{2,})", c, re.IGNORECASE)
                     if m2:
                         result["word"] = m2.group(1).strip().capitalize()
 
-            # ── phonetic منفصل ────────────────────────────────────────
             if not result.get("phonetic"):
                 m = re.search(r"/([^/]{1,30})/", c)
                 if m and len(m.group(1)) > 1:
                     result["phonetic"] = "/" + m.group(1) + "/"
 
-            # ── الغلط والصح ───────────────────────────────────────────
             if ("wrong" in ll or "❌" in line or "people say" in ll) and ":" in c:
                 val = c.split(":", 1)[-1].strip().strip('"').strip("'")
                 if val and not result.get("wrong"):
@@ -266,11 +258,9 @@ class VideoBuilder:
                 if val and len(val) > 3 and not result.get("correct"):
                     result["correct"] = val
 
-            # ── أمثلة ─────────────────────────────────────────────────
             elif c.startswith(("•", "→", "-")) and len(c) > 5:
                 examples.append(c.lstrip("•→- ").strip())
 
-            # ── memory trick ──────────────────────────────────────────
             elif ("trick" in ll or "tip" in ll or "memory" in ll) and ":" in c:
                 val = c.split(":", 1)[-1].strip()
                 if len(val) > 10 and not result.get("trick"):
@@ -278,7 +268,6 @@ class VideoBuilder:
 
         result["examples"] = examples[:3]
 
-        # قيم افتراضية لو الـ parse فشل
         if not result.get("word"):
             result["word"] = "English"
         if not result.get("wrong"):
