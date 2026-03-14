@@ -42,6 +42,9 @@ def pin(chat_id, message_id):
     _post("pinChatMessage", chat_id=chat_id,
           message_id=message_id, disable_notification=True)
 
+def unpin(chat_id, message_id):
+    _post("unpinChatMessage", chat_id=chat_id, message_id=message_id)
+
 def delete_webhook():
     r = _post("deleteWebhook", drop_pending_updates=False)
     log.info(f"deleteWebhook: {r}")
