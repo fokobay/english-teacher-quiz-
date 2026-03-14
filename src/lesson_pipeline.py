@@ -2,6 +2,7 @@
 Lesson pipeline for one group:
 Generate → Fetch image → Post → Pin → Quick poll → Record
 """
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -19,8 +20,12 @@ from src                   import api
 
 log = setup_logger("lesson")
 
-WORK_DIR = Path("workdir")
-WORK_DIR.mkdir(exist_ok=True)
+# BUG FIX: WORK_DIR was relative to CWD (workdir/) which breaks when the process
+# is started from a directory other than /app. Now anchored to DATA_DIR so it
+# always ends up in the same persistent volume as other bot data.
+_DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
+WORK_DIR  = _DATA_DIR / "workdir"
+WORK_DIR.mkdir(parents=True, exist_ok=True)
 
 # Lazy singletons — created on first use so import never fails
 # even if env-vars (GROQ_API_KEY, etc.) are not set at import time.
@@ -78,12 +83,9 @@ def run_lesson(chat_id: str) -> bool:
             log.warning(f"[{chat_id}] No image — posting text only")
             msg_id = poster.post_text(text, chat_id=chat_id, post_type=post_type)
 
-        # Pin the lesson message
-        # msg_id comes back as a string from TelegramPoster
         if msg_id:
             api.pin(chat_id, int(msg_id))
 
-        # Small quiz poll right after the lesson
         time.sleep(2)
         try:
             quiz = quiz_gen.generate(post_type, text)
