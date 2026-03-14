@@ -30,9 +30,23 @@ class Tracker:
 
     def _save(self):
         try:
+            self._trim()
             DB_PATH.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
             logger.warning(f"Tracker save failed: {e}")
+
+    def _trim(self):
+        """حافظ على آخر MAX_KEEP posts بس، وانسب الـ type_counts عليهم."""
+        posts = self._data.get("posts", [])
+        if len(posts) > MAX_KEEP:
+            self._data["posts"] = posts[-MAX_KEEP:]
+            # أعد حساب type_counts من الـ posts الموجودة بس
+            counts = {}
+            for p in self._data["posts"]:
+                t = p.get("post_type", "")
+                counts[t] = counts.get(t, 0) + 1
+            self._data["type_counts"] = counts
+            logger.info(f"Trimmed tracker: kept last {MAX_KEEP} posts, recalculated counts")
 
     def was_posted(self, subject: str) -> bool:
         s = subject.lower().strip()
