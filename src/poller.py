@@ -108,17 +108,10 @@ class Poller:
 
         time.sleep(1)
 
-        if status == "too_small":
-            self.groups.send_small_group(cid)
-            self.groups.notify_admin_rejected(cid, title, members)
-            time.sleep(2)
-            self.groups.leave(cid)
-
-        elif status == "pending":
-            # New group — send pending message and ask admin
-            self.groups.send_pending(cid)
-            self.groups.notify_admin_pending(cid, title, members)
-            log.info(f"[{cid}] Awaiting admin approval")
+        if status == "pending":
+            # Ask group owner to pick a start hour first
+            self.groups.send_hour_selection(cid)
+            log.info(f"[{cid}] Awaiting hour selection from group owner")
 
         elif status == "existing":
             # Previously approved — start directly
@@ -150,17 +143,52 @@ class Poller:
             self._delete_msg(cid, mid)
             self.groups.send_dashboard()
 
+        elif data.startswith("sethour:"):
+            # Sent from the group — group owner picking their start hour
+            parts = data.split(":")
+            gid   = parts[1]
+            try:
+                hour = int(parts[2])
+            except (IndexError, ValueError):
+                hour = 8
+
+            if not self.groups.is_awaiting_hour(gid):
+                self._answer_cb(cb["id"], "⚠️ Already set.")
+                return
+
+            self.groups.set_start_hour(gid, hour)
+            self._answer_cb(cb["id"], f"✅ Set to {hour:02d}:00 UTC!")
+
+            # Replace keyboard with confirmation
+            self._edit_msg(
+                cid, mid,
+                f"✅ <b>Posting time set to {hour:02d}:00 UTC</b>\n\n"
+                f"Schedule: {hour:02d}h — {(hour+6)%24:02d}h — "
+                f"{(hour+12)%24:02d}h — {(hour+18)%24:02d}h daily\n\n"
+                f"⏳ Waiting for admin approval before I start posting...",
+            )
+
+            # Notify bot-admin for approval
+            info    = self.groups._data.get(gid, {})
+            title_g = info.get("title", gid)
+            members = info.get("members", 0)
+            self.groups.send_pending(gid)
+            self.groups.notify_admin_pending(gid, title_g, members)
+            log.info(f"[{gid}] Hour set to {hour:02d}:00 — awaiting admin approval")
+
         elif data.startswith("approve:"):
             gid   = data.split(":", 1)[1]
             info  = self.groups._data.get(gid, {})
             title = info.get("title", gid)
+            start_hour = info.get("start_hour", 8)
             if self.groups.approve(gid):
-                self._answer_cb(cb["id"], "✅ Approved!")
+                self._answer_cb(cb["id"], f"✅ Approved! Posts at {start_hour:02d}:00 UTC")
                 self._edit_msg(
                     cid, mid,
                     f"✅ <b>Approved</b>\n"
                     f"📌 {title}\n"
                     f"🆔 <code>{gid}</code>\n"
+                    f"⏰ Start hour: <b>{start_hour:02d}:00 UTC</b>\n"
                     f"Bot is now active in this group.",
                 )
                 threading.Thread(
@@ -169,7 +197,7 @@ class Poller:
                     daemon=True,
                 ).start()
             else:
-                self._answer_cb(cb["id"], "⚠️ Group not found")
+                self._answer_cb(cb["id"], "⚠️ Group owner hasn't selected a time yet.")
 
         elif data.startswith("reject:"):
             gid   = data.split(":", 1)[1]
