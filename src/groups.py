@@ -1,6 +1,7 @@
 """
-Group registry — auto-join if >= 10,000 members, else leave immediately.
-No manual approval needed.
+Group registry — all groups require admin approval before the bot starts posting.
+Admin selects the daily start hour (0-23 UTC) when approving a group.
+The bot posts every 6 hours starting from that hour.
 Persists to DATA_DIR/groups.json
 
 Cycle per group (every 6h):
@@ -18,7 +19,6 @@ BASE     = f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN',''
 ADMIN_ID = os.environ.get("ADMIN_CHAT_ID", "")
 
 INTERVAL_HOURS    = 6
-MIN_MEMBERS       = 10_000
 PENDING_TIMEOUT_H = 24   # auto-reject pending groups after 24h with no admin response
 
 PENDING_MSG = (
@@ -33,20 +33,21 @@ REJECTED_MSG = (
     "Goodbye! 👋"
 )
 
-WELCOME = (
-    "👋 <b>Hello! I'm your English Teacher & Quiz Bot 📚🎯</b>\n\n"
-    "Every <b>6 hours</b> I alternate between:\n\n"
-    "📖 <b>English Lesson</b> — vocabulary, grammar, idioms & more\n"
-    "🧠 <b>English Quiz</b>  — 20 questions to test what you learned\n\n"
-    "🏆 Leaderboard after every quiz!\n\n"
-    "<i>Let's improve your English together! 🚀</i>"
-)
+def welcome_msg(start_hour: int) -> str:
+    return (
+        f"👋 <b>Hello! I'm your English Teacher & Quiz Bot 📚🎯</b>\n\n"
+        f"Every <b>6 hours</b> I alternate between:\n\n"
+        f"📖 <b>English Lesson</b> — vocabulary, grammar, idioms & more\n"
+        f"🧠 <b>English Quiz</b>  — 20 questions to test what you learned\n\n"
+        f"🏆 Leaderboard after every quiz!\n\n"
+        f"⏰ Posting schedule starts at <b>{start_hour:02d}:00 UTC</b> "
+        f"(every 6h: {start_hour:02d}h, {(start_hour+6)%24:02d}h, "
+        f"{(start_hour+12)%24:02d}h, {(start_hour+18)%24:02d}h)\n\n"
+        f"<i>Let's improve your English together! 🚀</i>"
+    )
 
-SMALL_GROUP_MSG = (
-    "⚠️ <b>Minimum 10,000 members required.</b>\n\n"
-    "This group doesn't meet the requirement.\n"
-    "I'll leave now. Goodbye! 👋"
-)
+# Keep a static fallback for backward-compat (e.g. reactivated groups with no start_hour)
+WELCOME = welcome_msg(8)
 
 
 class Groups:
@@ -148,24 +149,20 @@ class Groups:
     # ── Join / Leave ──────────────────────────────────────────────────
 
     def handle_join(self, chat_id: str, title: str) -> str:
-        """Returns: 'pending' | 'too_small' | 'existing' | 'unknown'
+        """Returns: 'pending' | 'existing' | 'unknown'
 
-        New groups always go to pending and wait for admin approval.
+        All new groups go to pending and wait for admin approval.
+        Admin also selects the start hour when approving.
         Previously approved groups that rejoin are reactivated directly.
         """
         gid      = str(chat_id)
         count    = self.get_member_count(gid)
         username = self.get_chat_username(gid)
 
+        # count=None means API unreachable — skip rather than reject
         if count is None:
             log.warning(f"Could not verify member count for {title} ({gid}) — skipping join")
             return "unknown"
-
-        if count < MIN_MEMBERS:
-            log.info(f"Too small: {title} ({gid}) — {count} members < {MIN_MEMBERS:,}")
-            # Store count so notify_admin_rejected shows real number
-            self._data.setdefault(gid, {}).update({"title": title, "members": count, "active": False})
-            return "too_small"
 
         # Previously approved group rejoining — reactivate directly, no re-approval needed
         if gid in self._data and self._data[gid].get("approved_at"):
@@ -179,33 +176,44 @@ class Groups:
             log.info(f"Reactivated: {title} ({gid}) — {count} members")
             return "existing"
 
-        # Brand new group — set pending, wait for admin
+        # Brand new group — send hour-selection in the group, then wait for admin approval
         self._data[gid] = {
-            "chat_id":    gid,
-            "title":      title,
-            "username":   username,
-            "joined_at":  time.time(),
-            "last_post":  0,
-            "next_step":  0,
-            "quiz_count": 0,
-            "active":     False,
-            "pending":    True,
-            "members":    count,
+            "chat_id":       gid,
+            "title":         title,
+            "username":      username,
+            "joined_at":     time.time(),
+            "last_post":     0,
+            "next_step":     0,
+            "quiz_count":    0,
+            "active":        False,
+            "pending":       True,
+            "members":       count,
+            "start_hour":    None,   # set by group owner via inline keyboard
+            "awaiting_hour": True,   # waiting for owner to pick a start hour
         }
         self._save()
         log.info(f"Pending approval: {title} ({gid}) — {count:,} members")
         return "pending"
 
     def approve(self, chat_id: str) -> bool:
-        """Admin approved a pending group. Returns True if found."""
+        """Bot-admin approved a pending group.
+        Uses the start_hour already chosen by the group owner.
+        Returns True if found and has a start_hour set.
+        """
         gid = str(chat_id)
         if gid not in self._data:
+            return False
+        # Must have a start_hour chosen by the group owner already
+        if self._data[gid].get("start_hour") is None:
+            log.warning(f"Approve attempted but no start_hour set yet for {gid}")
             return False
         self._data[gid]["active"]      = True
         self._data[gid]["pending"]     = False
         self._data[gid]["approved_at"] = time.time()
+        self._data[gid]["last_post"]   = 0
         self._save()
-        log.info(f"Approved: {gid}")
+        start_hour = self._data[gid]["start_hour"]
+        log.info(f"Approved: {gid} — start_hour={start_hour:02d}:00 UTC")
         return True
 
     def reject_pending(self, chat_id: str) -> bool:
@@ -287,23 +295,29 @@ class Groups:
     # ── Scheduler ────────────────────────────────────────────────────
 
     def due(self, memory: dict, running: set = None) -> list:
-        """Return [(chat_id, step), ...] for groups whose next step is due."""
+        """Return [(chat_id, step), ...] for groups whose next step is due.
+        A group is due when at least INTERVAL_HOURS have passed since the last post.
+        """
         now     = time.time()
         result  = []
         running = running or set()
+
         for gid, info in self._data.items():
             if not info.get("active"):
                 continue
             if gid in running:
                 continue
+
             last    = memory.get(gid, info.get("last_post", 0))
             elapsed = (now - last) / 3600
+
             if elapsed >= INTERVAL_HOURS:
                 result.append((gid, info.get("next_step", 0)))
             else:
                 rem  = INTERVAL_HOURS - elapsed
                 name = "lesson" if info.get("next_step", 0) == 0 else "quiz"
                 log.info(f"⏳ {info['title']} — {rem:.1f}h until {name}")
+
         return result
 
     def active_count(self) -> int:
@@ -314,6 +328,43 @@ class Groups:
 
     # ── Messages ─────────────────────────────────────────────────────
 
+    def set_start_hour(self, chat_id: str, hour: int) -> bool:
+        """Called when the group owner picks a start hour from the inline keyboard.
+        Stores the hour and clears awaiting_hour flag.
+        Returns True if the group is still pending (valid state).
+        """
+        gid = str(chat_id)
+        if gid not in self._data:
+            return False
+        self._data[gid]["start_hour"]    = hour
+        self._data[gid]["awaiting_hour"] = False
+        self._save()
+        log.info(f"start_hour set: {gid} → {hour:02d}:00 UTC")
+        return True
+
+    def is_awaiting_hour(self, chat_id: str) -> bool:
+        return self._data.get(str(chat_id), {}).get("awaiting_hour", False)
+
+    def send_hour_selection(self, chat_id: str):
+        """Send the 24-hour selection keyboard to the group so the owner can pick a time."""
+        hour_rows = []
+        for row_start in range(0, 24, 4):
+            row = [
+                {
+                    "text":          f"🕐 {h:02d}:00",
+                    "callback_data": f"sethour:{chat_id}:{h}",
+                }
+                for h in range(row_start, row_start + 4)
+            ]
+            hour_rows.append(row)
+        self._send(
+            chat_id,
+            "⏰ <b>Choose the daily posting start time (UTC)</b>\n\n"
+            "The bot will post every 6 hours starting from the hour you select.\n\n"
+            "<i>Example: pick 08:00 → posts at 08:00, 14:00, 20:00, 02:00 daily</i>",
+            reply_markup={"inline_keyboard": hour_rows},
+        )
+
     def send_pending(self, chat_id: str):
         self._send(chat_id, PENDING_MSG)
 
@@ -321,13 +372,13 @@ class Groups:
         self._send(chat_id, REJECTED_MSG)
 
     def welcome(self, chat_id: str):
-        self._send(chat_id, WELCOME)
-
-    def send_small_group(self, chat_id: str):
-        self._send(chat_id, SMALL_GROUP_MSG)
+        start_hour = self._data.get(str(chat_id), {}).get("start_hour", 8)
+        self._send(chat_id, welcome_msg(start_hour if start_hour is not None else 8))
 
     def notify_admin_pending(self, chat_id: str, title: str, members: int):
-        """Ask admin to approve or reject a new group."""
+        """Notify bot-admin of a new pending group — simple approve/reject only.
+        The start hour is chosen by the group owner directly in the group chat.
+        """
         if not ADMIN_ID:
             return
         g    = self._data.get(str(chat_id), {"chat_id": chat_id, "title": title})
@@ -338,7 +389,7 @@ class Groups:
             f"📌 {link}\n"
             f"🆔 <code>{chat_id}</code>\n"
             f"👥 {members:,} members\n\n"
-            f"Do you want me to join this group?",
+            f"Do you want me to start posting in this group?",
             reply_markup={"inline_keyboard": [[
                 {"text": "✅ Approve", "callback_data": f"approve:{chat_id}"},
                 {"text": "❌ Reject",  "callback_data": f"reject:{chat_id}"},
@@ -348,14 +399,16 @@ class Groups:
     def notify_admin_join(self, chat_id: str, title: str, members: int):
         if not ADMIN_ID:
             return
-        g    = self._data.get(str(chat_id), {"chat_id": chat_id, "title": title})
-        link = self._group_link(g)
+        g          = self._data.get(str(chat_id), {"chat_id": chat_id, "title": title})
+        link       = self._group_link(g)
+        start_hour = self._data.get(str(chat_id), {}).get("start_hour", 8)
         self._send(
             ADMIN_ID,
             f"✅ <b>New group joined</b>\n\n"
             f"📌 {link}\n"
             f"🆔 <code>{chat_id}</code>\n"
-            f"👥 {members:,} members",
+            f"👥 {members:,} members\n"
+            f"⏰ Posts at {start_hour:02d}:00 UTC (every 6h)",
             reply_markup={"inline_keyboard": [[
                 {"text": "🗑 Remove & Leave", "callback_data": f"remove:{chat_id}"},
             ]]},
@@ -366,10 +419,10 @@ class Groups:
             return
         self._send(
             ADMIN_ID,
-            f"🚫 <b>Left small group</b>\n\n"
+            f"🚫 <b>Group rejected</b>\n\n"
             f"📌 <b>{title}</b>\n"
             f"🆔 <code>{chat_id}</code>\n"
-            f"👥 {members:,} members (< {MIN_MEMBERS:,} required)",
+            f"👥 {members:,} members",
         )
 
     def send_dashboard(self):
@@ -389,8 +442,14 @@ class Groups:
 
         for g in groups:
             link    = self._group_link(g)
-            nxt     = "📖 lesson" if g.get("next_step", 0) == 0 else "🎯 quiz"
-            quizzes = g.get("quiz_count", 0)
+            nxt        = "📖 lesson" if g.get("next_step", 0) == 0 else "🎯 quiz"
+            quizzes    = g.get("quiz_count", 0)
+            start_hour = g.get("start_hour")
+            schedule   = (
+                f"{start_hour:02d}h/{(start_hour+6)%24:02d}h/"
+                f"{(start_hour+12)%24:02d}h/{(start_hour+18)%24:02d}h UTC"
+                if start_hour is not None else "—"
+            )
             joined  = time.strftime(
                 "%d %b %Y", time.localtime(g.get("joined_at", 0))
             )
@@ -399,6 +458,7 @@ class Groups:
                 f"🆔 <code>{g['chat_id']}</code>\n"
                 f"👥 {g.get('members', 0):,} members\n"
                 f"🗓 Joined: {joined}\n"
+                f"⏰ Schedule: {schedule}\n"
                 f"🎯 Quizzes done: {quizzes}\n"
                 f"⏭ Next: {nxt}"
             )
