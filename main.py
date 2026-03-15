@@ -34,6 +34,16 @@ def scheduler():
     while True:
         try:
             groups.reload()
+
+            # ── Auto-expire pending groups after 24h ──────────────────
+            expired = groups.expire_pending()
+            for gid in expired:
+                info = groups._data.get(gid, {})
+                log.info(f"Auto-rejecting expired pending: {info.get('title', gid)}")
+                groups.send_rejected(gid)
+                time.sleep(1)
+                groups.leave(gid)
+
             with _lock:
                 running_snap = set(_running)
 
