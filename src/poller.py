@@ -95,8 +95,6 @@ class Poller:
             self.groups.remove(cid)
 
     def _handle_join(self, cid: str, title: str):
-        # BUG FIX: protect _joined_recently with a lock — this method runs in
-        # its own daemon thread and multiple groups can join simultaneously.
         with self._joined_lock:
             if cid in self._joined_recently:
                 log.info(f"Duplicate join ignored: {title} ({cid})")
@@ -116,16 +114,17 @@ class Poller:
             time.sleep(2)
             self.groups.leave(cid)
 
-        elif status == "approved":
-            self.groups.welcome(cid)
-            self.groups.notify_admin_join(cid, title, members)
+        elif status == "pending":
+            # New group — send pending message and ask admin
+            self.groups.send_pending(cid)
+            self.groups.notify_admin_pending(cid, title, members)
+            log.info(f"[{cid}] Awaiting admin approval")
 
         elif status == "existing":
+            # Previously approved — start directly
             self.groups.welcome(cid)
 
         elif status == "unknown":
-            # API failed — don't leave; log and do nothing so the scheduler
-            # can still serve the group if it was already registered.
             log.warning(f"Join for {title} ({cid}) skipped — member count unknown")
 
     def _discard_joined(self, cid: str):
@@ -151,6 +150,47 @@ class Poller:
             self._delete_msg(cid, mid)
             self.groups.send_dashboard()
 
+        elif data.startswith("approve:"):
+            gid   = data.split(":", 1)[1]
+            info  = self.groups._data.get(gid, {})
+            title = info.get("title", gid)
+            if self.groups.approve(gid):
+                self._answer_cb(cb["id"], "✅ Approved!")
+                self._edit_msg(
+                    cid, mid,
+                    f"✅ <b>Approved</b>\n"
+                    f"📌 {title}\n"
+                    f"🆔 <code>{gid}</code>\n"
+                    f"Bot is now active in this group.",
+                )
+                threading.Thread(
+                    target=self._start_approved,
+                    args=(gid, info.get("members", 0), title),
+                    daemon=True,
+                ).start()
+            else:
+                self._answer_cb(cb["id"], "⚠️ Group not found")
+
+        elif data.startswith("reject:"):
+            gid   = data.split(":", 1)[1]
+            info  = self.groups._data.get(gid, {})
+            title = info.get("title", gid)
+            if self.groups.reject_pending(gid):
+                self._answer_cb(cb["id"], "❌ Rejected")
+                self._edit_msg(
+                    cid, mid,
+                    f"❌ <b>Rejected</b>\n"
+                    f"📌 {title}\n"
+                    f"🆔 <code>{gid}</code>\n"
+                    f"Bot will leave the group.",
+                )
+                time.sleep(1)
+                self.groups.send_rejected(gid)
+                time.sleep(1)
+                self.groups.leave(gid)
+            else:
+                self._answer_cb(cb["id"], "⚠️ Group not found")
+
         elif data.startswith("remove:"):
             gid  = data.split(":", 1)[1]
             info = self.groups._data.get(gid, {})
@@ -167,6 +207,13 @@ class Poller:
             else:
                 self._answer_cb(cb["id"], "⚠️ Group not found")
 
+    def _start_approved(self, gid: str, members: int, title: str):
+        """Called after admin approves — welcome and notify."""
+        time.sleep(1)
+        self.groups.welcome(gid)
+        self.groups.notify_admin_join(gid, title, members)
+        log.info(f"[{gid}] Bot started after admin approval")
+
     # ── Admin text commands ───────────────────────────────────────────
 
     def _on_admin_cmd(self, text: str):
@@ -177,6 +224,26 @@ class Poller:
 
         if cmd in ("/dashboard", "/groups"):
             self.groups.send_dashboard()
+
+        elif cmd == "/pending":
+            pending = self.groups.pending_list()
+            if not pending:
+                self.groups._send(ADMIN_ID, "✅ No groups waiting for approval.")
+                return
+            self.groups._send(ADMIN_ID, f"⏳ <b>Pending approval: {len(pending)} group(s)</b>")
+            for g in pending:
+                age_h = (time.time() - g.get("joined_at", 0)) / 3600
+                self.groups._send(
+                    ADMIN_ID,
+                    f"📌 <b>{g['title']}</b>\n"
+                    f"🆔 <code>{g['chat_id']}</code>\n"
+                    f"👥 {g.get('members', 0):,} members\n"
+                    f"⏱ Waiting {age_h:.1f}h",
+                    reply_markup={"inline_keyboard": [[
+                        {"text": "✅ Approve", "callback_data": f"approve:{g['chat_id']}"},
+                        {"text": "❌ Reject",  "callback_data": f"reject:{g['chat_id']}"},
+                    ]]},
+                )
 
         elif cmd == "/remove" and len(parts) == 2:
             gid = parts[1]
@@ -191,6 +258,7 @@ class Poller:
                 ADMIN_ID,
                 "🤖 <b>Admin Commands</b>\n\n"
                 "/dashboard — show all active groups\n"
+                "/pending   — show groups waiting for approval\n"
                 "/remove [id] — remove group & leave\n",
             )
 
