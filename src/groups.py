@@ -17,8 +17,21 @@ DB       = DATA_DIR / "groups.json"
 BASE     = f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN','')}"
 ADMIN_ID = os.environ.get("ADMIN_CHAT_ID", "")
 
-INTERVAL_HOURS = 6
-MIN_MEMBERS    = 10_000
+INTERVAL_HOURS    = 6
+MIN_MEMBERS       = 10_000
+PENDING_TIMEOUT_H = 24   # auto-reject pending groups after 24h with no admin response
+
+PENDING_MSG = (
+    "⏳ <b>Thanks for adding me!</b>\n\n"
+    "I'm waiting for admin approval before I start posting.\n"
+    "I'll leave automatically if there's no response within 24 hours. 📚"
+)
+
+REJECTED_MSG = (
+    "🚫 <b>Access denied by admin.</b>\n\n"
+    "I wasn't approved for this group.\n"
+    "Goodbye! 👋"
+)
 
 WELCOME = (
     "👋 <b>Hello! I'm your English Teacher & Quiz Bot 📚🎯</b>\n\n"
@@ -135,22 +148,27 @@ class Groups:
     # ── Join / Leave ──────────────────────────────────────────────────
 
     def handle_join(self, chat_id: str, title: str) -> str:
-        """Returns: 'approved' | 'too_small' | 'existing' | 'unknown'"""
+        """Returns: 'pending' | 'too_small' | 'existing' | 'unknown'
+
+        New groups always go to pending and wait for admin approval.
+        Previously approved groups that rejoin are reactivated directly.
+        """
         gid      = str(chat_id)
         count    = self.get_member_count(gid)
         username = self.get_chat_username(gid)
 
-        # BUG FIX: count=None means the API failed — don't reject the group.
-        # Return 'unknown' so poller skips silently instead of leaving.
         if count is None:
             log.warning(f"Could not verify member count for {title} ({gid}) — skipping join")
             return "unknown"
 
         if count < MIN_MEMBERS:
             log.info(f"Too small: {title} ({gid}) — {count} members < {MIN_MEMBERS:,}")
+            # Store count so notify_admin_rejected shows real number
+            self._data.setdefault(gid, {}).update({"title": title, "members": count, "active": False})
             return "too_small"
 
-        if gid in self._data:
+        # Previously approved group rejoining — reactivate directly, no re-approval needed
+        if gid in self._data and self._data[gid].get("approved_at"):
             self._data[gid]["active"]   = True
             self._data[gid]["title"]    = title
             self._data[gid]["username"] = username
@@ -158,9 +176,10 @@ class Groups:
             if time.time() - self._data[gid].get("last_post", 0) > 86400:
                 self._data[gid]["last_post"] = 0
             self._save()
-            log.info(f"Reactivated: {title} ({gid}) — {count} members, quiz_count={self._data[gid].get('quiz_count',0)}")
+            log.info(f"Reactivated: {title} ({gid}) — {count} members")
             return "existing"
 
+        # Brand new group — set pending, wait for admin
         self._data[gid] = {
             "chat_id":    gid,
             "title":      title,
@@ -169,12 +188,54 @@ class Groups:
             "last_post":  0,
             "next_step":  0,
             "quiz_count": 0,
-            "active":     True,
+            "active":     False,
+            "pending":    True,
             "members":    count,
         }
         self._save()
-        log.info(f"New group: {title} ({gid}) — {count} members ✓")
-        return "approved"
+        log.info(f"Pending approval: {title} ({gid}) — {count:,} members")
+        return "pending"
+
+    def approve(self, chat_id: str) -> bool:
+        """Admin approved a pending group. Returns True if found."""
+        gid = str(chat_id)
+        if gid not in self._data:
+            return False
+        self._data[gid]["active"]      = True
+        self._data[gid]["pending"]     = False
+        self._data[gid]["approved_at"] = time.time()
+        self._save()
+        log.info(f"Approved: {gid}")
+        return True
+
+    def reject_pending(self, chat_id: str) -> bool:
+        """Admin rejected a pending group. Returns True if found."""
+        gid = str(chat_id)
+        if gid not in self._data:
+            return False
+        self._data[gid]["active"]  = False
+        self._data[gid]["pending"] = False
+        self._save()
+        log.info(f"Rejected: {gid}")
+        return True
+
+    def expire_pending(self) -> list:
+        """Auto-reject pending groups older than PENDING_TIMEOUT_H. Returns expired IDs."""
+        now, expired = time.time(), []
+        for gid, info in self._data.items():
+            if not info.get("pending"):
+                continue
+            if (now - info.get("joined_at", now)) / 3600 >= PENDING_TIMEOUT_H:
+                expired.append(gid)
+        for gid in expired:
+            self._data[gid]["pending"] = False
+            self._data[gid]["active"]  = False
+        if expired:
+            self._save()
+        return expired
+
+    def pending_list(self) -> list:
+        return [v for v in self._data.values() if v.get("pending")]
 
     def remove_by_admin(self, chat_id: str) -> bool:
         gid = str(chat_id)
@@ -253,11 +314,36 @@ class Groups:
 
     # ── Messages ─────────────────────────────────────────────────────
 
+    def send_pending(self, chat_id: str):
+        self._send(chat_id, PENDING_MSG)
+
+    def send_rejected(self, chat_id: str):
+        self._send(chat_id, REJECTED_MSG)
+
     def welcome(self, chat_id: str):
         self._send(chat_id, WELCOME)
 
     def send_small_group(self, chat_id: str):
         self._send(chat_id, SMALL_GROUP_MSG)
+
+    def notify_admin_pending(self, chat_id: str, title: str, members: int):
+        """Ask admin to approve or reject a new group."""
+        if not ADMIN_ID:
+            return
+        g    = self._data.get(str(chat_id), {"chat_id": chat_id, "title": title})
+        link = self._group_link(g)
+        self._send(
+            ADMIN_ID,
+            f"🔔 <b>New group — approval required</b>\n\n"
+            f"📌 {link}\n"
+            f"🆔 <code>{chat_id}</code>\n"
+            f"👥 {members:,} members\n\n"
+            f"Do you want me to join this group?",
+            reply_markup={"inline_keyboard": [[
+                {"text": "✅ Approve", "callback_data": f"approve:{chat_id}"},
+                {"text": "❌ Reject",  "callback_data": f"reject:{chat_id}"},
+            ]]},
+        )
 
     def notify_admin_join(self, chat_id: str, title: str, members: int):
         if not ADMIN_ID:
